@@ -10,6 +10,7 @@ module "aft" {
   ct_home_region              = var.ct_home_region
   tf_backend_secondary_region = var.tf_backend_secondary_region
   aft_enable_vpc              = var.aft_enable_vpc
+  terraform_version           = var.terraform_version
 
   vcs_provider                                  = "github"
   account_request_repo_name                     = "${var.github_org_name}/fynex-terraform-aft-account-request"

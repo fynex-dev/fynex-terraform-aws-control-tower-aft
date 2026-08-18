@@ -40,3 +40,8 @@ variable "aft_enable_vpc" {
   description = "Flag to enable VPC for AFT"
   type        = bool
 }
+
+variable "terraform_version" {
+  description = "The version of Terraform to use"
+  type        = string
+}
